@@ -28,7 +28,6 @@ def save_subscribers(subs: set):
 
 subscribers = load_subscribers()
 
-# Discord клиент
 intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
@@ -50,7 +49,6 @@ async def send_to_all(text: str):
             "parse_mode": "HTML",
         })
         if not result.get("ok"):
-            # Пользователь заблокировал бота — удаляем
             err = result.get("error_code")
             if err in (403, 400):
                 dead.add(chat_id)
@@ -61,8 +59,37 @@ async def send_to_all(text: str):
     print(f"[TG] Отправлено {len(subscribers)} подписчикам")
 
 
+def build_tg_text(message: discord.Message, edited: bool = False) -> str:
+    channel_name = message.channel.name
+    server_name = message.guild.name if message.guild else "DayZ"
+
+    header = "🔄 <b>Обновление ивента</b>" if edited else "🎮 <b>Новый ивент</b>"
+
+    tg_text = (
+        f"{header} на сервере {server_name}!\n\n"
+        f"📢 <b>Канал:</b> #{channel_name}\n\n"
+    )
+
+    if message.content:
+        tg_text += f"📝 {message.content}"
+
+    if message.embeds:
+        embed = message.embeds[0]
+        parts = []
+        if embed.title:
+            parts.append(f"<b>{embed.title}</b>")
+        if embed.description:
+            parts.append(embed.description)
+        # Поля embed (например Локация, Статус)
+        for field in embed.fields:
+            parts.append(f"<b>{field.name}:</b> {field.value}")
+        if parts:
+            tg_text += "\n".join(parts)
+
+    return tg_text
+
+
 async def poll_telegram():
-    """Слушаем Telegram через long polling — обрабатываем /start и /stop"""
     offset = None
     print("[TG] Polling запущен...")
     while True:
@@ -89,7 +116,7 @@ async def poll_telegram():
                         "text": (
                             f"✅ Привет, {first_name}!\n\n"
                             "Ты подписан на уведомления об ивентах DayZ.\n"
-                            "Когда начнётся ивент — я напишу тебе сюда 🎮\n\n"
+                            "Когда начнётся или обновится ивент — я напишу тебе сюда 🎮\n\n"
                             "Чтобы отписаться — напиши /stop"
                         ),
                     })
@@ -114,46 +141,61 @@ async def on_ready():
     print(f"[Discord] Бот запущен как {discord_client.user}")
     print(f"[Discord] Слушаю канал ID: {EVENT_CHANNEL_ID}")
     print(f"[TG] Подписчиков: {len(subscribers)}")
-    # Запускаем Telegram polling параллельно
     asyncio.create_task(poll_telegram())
 
 
 @discord_client.event
 async def on_message(message: discord.Message):
+    """Новое сообщение в канале"""
     if message.channel.id != EVENT_CHANNEL_ID:
         return
     if not message.author.bot:
         return
 
-    print(f"[Discord] Сообщение от бота: {message.author} → {message.content[:80]}")
-
-    channel_name = message.channel.name
-    server_name = message.guild.name if message.guild else "DayZ"
-
-    tg_text = (
-        f"🎮 <b>Ивент на сервере {server_name}!</b>\n\n"
-        f"📢 <b>Канал:</b> #{channel_name}\n"
-        f"🤖 <b>От:</b> {message.author.display_name}\n\n"
-    )
-
-    if message.content:
-        tg_text += f"📝 {message.content}"
-
-    if message.embeds:
-        embed = message.embeds[0]
-        parts = []
-        if embed.title:
-            parts.append(f"<b>{embed.title}</b>")
-        if embed.description:
-            parts.append(embed.description)
-        if parts:
-            tg_text += "\n".join(parts)
+    print(f"[Discord] Новое сообщение: {message.author}")
 
     if not subscribers:
         print("[TG] Нет подписчиков, пропускаю")
         return
 
-    await send_to_all(tg_text)
+    await send_to_all(build_tg_text(message, edited=False))
+
+
+@discord_client.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """Сообщение отредактировано — именно так работает этот Discord сервер"""
+    if after.channel.id != EVENT_CHANNEL_ID:
+        return
+    if not after.author.bot:
+        return
+
+    # Отправляем только если реально что-то изменилось
+    before_embed = before.embeds[0] if before.embeds else None
+    after_embed = after.embeds[0] if after.embeds else None
+
+    before_text = (
+        (before_embed.title or "") +
+        (before_embed.description or "") +
+        "".join(f.value for f in before_embed.fields)
+    ) if before_embed else before.content
+
+    after_text = (
+        (after_embed.title or "") +
+        (after_embed.description or "") +
+        "".join(f.value for f in after_embed.fields)
+    ) if after_embed else after.content
+
+    if before_text == after_text:
+        print("[Discord] Редактирование без изменений, пропускаю")
+        return
+
+    print(f"[Discord] Сообщение изменено: {after.author}")
+
+    if not subscribers:
+        print("[TG] Нет подписчиков, пропускаю")
+        return
+
+    await send_to_all(build_tg_text(after, edited=True))
 
 
 discord_client.run(DISCORD_TOKEN)
