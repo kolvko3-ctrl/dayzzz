@@ -12,7 +12,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 EVENT_CHANNEL_ID = int(os.getenv("EVENT_CHANNEL_ID"))
 
 SUBSCRIBERS_FILE = "subscribers.json"
-POLL_INTERVAL = 30  # секунд между проверками
+POLL_INTERVAL = 30
 
 def load_subscribers():
     if os.path.exists(SUBSCRIBERS_FILE):
@@ -30,7 +30,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
 
-# Храним последнее состояние сообщений {message_id: "текст"}
 last_seen = {}
 
 
@@ -55,7 +54,6 @@ async def send_to_all(text: str):
         if not result.get("ok"):
             if result.get("error_code") in (403, 400):
                 dead.add(chat_id)
-                print(f"[TG] Удаляю мёртвого подписчика: {chat_id}")
     if dead:
         subscribers.difference_update(dead)
         save_subscribers(subscribers)
@@ -63,7 +61,6 @@ async def send_to_all(text: str):
 
 
 def extract_text(message: discord.Message) -> str:
-    """Извлекаем весь текст из сообщения включая embed поля"""
     parts = []
     if message.content:
         parts.append(message.content)
@@ -80,9 +77,7 @@ def extract_text(message: discord.Message) -> str:
 def build_tg_text(message: discord.Message) -> str:
     server_name = message.guild.name if message.guild else "DayZ"
     channel_name = message.channel.name
-
     tg_text = f"🎮 <b>Обновление ивентов — {server_name}</b>\n📢 #{channel_name}\n\n"
-
     for embed in message.embeds:
         if embed.title:
             tg_text += f"<b>{embed.title}</b>\n"
@@ -91,41 +86,44 @@ def build_tg_text(message: discord.Message) -> str:
         for field in embed.fields:
             tg_text += f"<b>{field.name}:</b> {field.value}\n"
         tg_text += "\n"
-
     if message.content and not message.embeds:
         tg_text += message.content
-
     return tg_text.strip()
 
 
 async def poll_channel():
-    """Каждые N секунд читаем канал и проверяем изменения"""
     await discord_client.wait_until_ready()
-    print(f"[Poller] Запущен, интервал {POLL_INTERVAL}с")
+    print("[Poller] Бот готов, ищу канал...")
 
-    channel = discord_client.get_channel(EVENT_CHANNEL_ID)
+    # Ждём пока канал появится (до 60 секунд)
+    channel = None
+    for attempt in range(12):
+        channel = discord_client.get_channel(EVENT_CHANNEL_ID)
+        if channel:
+            break
+        print(f"[Poller] Канал не найден, жду... (попытка {attempt+1}/12)")
+        await asyncio.sleep(5)
+
     if not channel:
-        print(f"[Poller] ОШИБКА: канал {EVENT_CHANNEL_ID} не найден!")
+        print(f"[Poller] ОШИБКА: канал {EVENT_CHANNEL_ID} недоступен. Проверьте что бот добавлен на сервер и имеет доступ к каналу.")
         return
+
+    print(f"[Poller] Канал найден: #{channel.name} на сервере {channel.guild.name}")
+    print(f"[Poller] Опрос каждые {POLL_INTERVAL} секунд")
 
     while not discord_client.is_closed():
         try:
-            # Читаем последние 10 сообщений от ботов
             async for message in channel.history(limit=10):
                 if not message.author.bot:
                     continue
-
                 current_text = extract_text(message)
                 prev_text = last_seen.get(message.id)
 
                 if prev_text is None:
-                    # Первый запуск — просто запоминаем, не отправляем
                     last_seen[message.id] = current_text
-                    print(f"[Poller] Запомнил сообщение {message.id}")
-
+                    print(f"[Poller] Запомнил сообщение {message.id}: {current_text[:60]}...")
                 elif prev_text != current_text:
-                    # Текст изменился — отправляем уведомление!
-                    print(f"[Poller] Изменение в сообщении {message.id}, отправляю...")
+                    print(f"[Poller] Изменение! Отправляю уведомление...")
                     last_seen[message.id] = current_text
                     await send_to_all(build_tg_text(message))
 
@@ -136,7 +134,6 @@ async def poll_channel():
 
 
 async def poll_telegram():
-    """Слушаем команды /start и /stop от пользователей"""
     offset = None
     print("[TG] Polling запущен...")
     while True:
